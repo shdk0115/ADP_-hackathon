@@ -14,7 +14,8 @@ ADP_-hackathon/
 ├── main.py                 # Application entry point
 │
 ├── agents/                 # Orchestration logic for autonomous agents
-│   └── index_agent.py      # Agent responsible for indexing decisions
+│   └── opensearch_agent.py      # Agent responsible for indexing decisions
+│   └── data_analysis.py    # Agent responsible for analyzing income data
 │
 ├── clients/                # Third-party service clients
 │   └── bedrock_client.py   # AWS Bedrock interface for LLM/Embeddings
