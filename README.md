@@ -1,36 +1,42 @@
-# ADP_-hackathon
-ADP
+import os
 
-project_root/
+# Define the content of the markdown file
+md_content = """# ADP Hackathon Project Structure
+
+This repository contains the source code and data for the ADP Hackathon project, focusing on agentic search and retrieval using AWS Bedrock and OpenSearch.
+
+## Directory Layout
+
+```text
+ADP_-hackathon/
+├── .env                    # Environment variables (API keys, endpoints)
+├── config.py               # Global configuration and constants
+├── main.py                 # Application entry point
 │
-├── .env/
-├── config.py/
-├── main.py/
+├── agents/                 # Orchestration logic for autonomous agents
+│   └── index_agent.py      # Agent responsible for indexing decisions
 │
-├── agents/
-│   └── index_agent.py
+├── clients/                # Third-party service clients
+│   └── bedrock_client.py   # AWS Bedrock interface for LLM/Embeddings
 │
-├── clients/                
-│   └── bedrock_client.py
+├── data/                   # Data storage
+│   ├── qa_sheet/           # Evaluation datasets (Questions/Answers)
+│   └── raw_data/           # Source documents before processing
 │
-├── data/                
-│   └── qa_sheet
-│   └── raw_data
+├── evaluation/             # Testing and performance metrics
+│   ├── error_analysis/     # Logs and reports on retrieval failures
+│   └── evaluator.py        # Script to run RAG evaluation (e.g., Ragas/DeepEval)
 │
-├── evaluation/                
-│   └── error_analysis
-│   └── evaluator.py
+├── tools/                  # Utility functions and RAG enhancement techniques
+│   ├── keyword_extraction.py # NLP tools to pull keywords from queries
+│   ├── hyde.py             # Hypothetical Document Embeddings implementation
+│   ├── analyzer.py         # Text analysis and statistics
+│   ├── add_dcr.py          # Document Content Re-ranking/processing
+│   └── preprocessor.py     # Data cleaning and chunking logic
 │
-├── tools/
-│   ├── keyword_extraction.py
-│   ├── hyde.py
-│   ├── analyzer.py
-│   ├── add_dcr.py
-│   ├── preprocessor.py
-│
-├── opensearch/
-│   ├── default_index.py
-│   ├── default_search.py
-│   ├── agentic_index.py
-│   ├── agentic_search.py
-│   ├── ingest.py
+└── opensearch/             # OpenSearch integration and search logic
+    ├── default_index.py    # Standard indexing scripts
+    ├── default_search.py   # Baseline search implementation
+    ├── agentic_index.py    # Advanced indexing for agent-based retrieval
+    ├── agentic_search.py   # Multi-step or tool-augmented search logic
+    └── ingest.py           # Data ingestion pipeline
