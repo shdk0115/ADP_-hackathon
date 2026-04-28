@@ -3,7 +3,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain.llms import Bedrock
 import re
 from config import AWS_REGION, BEDROCK_TEXT_MODEL
-
+from bedrock_client import get_text_llm
 
 def get_keyword_extraction_template():
     return """
@@ -20,11 +20,7 @@ def get_keyword_extraction_template():
 
 
 def build_keyword_extractor(region=AWS_REGION, model_id=BEDROCK_TEXT_MODEL):
-    llm = Bedrock(
-        region_name=region,
-        model_id=model_id
-    )
-
+    llm = get_text_llm()
     prompt = PromptTemplate(
         input_variables=["text"],
         template=get_keyword_extraction_template()
@@ -35,7 +31,7 @@ def build_keyword_extractor(region=AWS_REGION, model_id=BEDROCK_TEXT_MODEL):
 
 
 def extract_keywords(text, chain):
-    raw_output = chain.invoke({"review": text})
+    raw_output = chain.invoke({"text": text})
 
     # Clean + normalize
     keywords = re.findall(r'\b\w+\b', raw_output.lower())
