@@ -7,19 +7,26 @@ from bedrock_client import get_text_llm
 
 def get_keyword_extraction_template():
     return """
-    You are a keyword extractor.
+    You are a keyword extractor. Analyze the given <text> and follow the rules below.
 
-    Extract ONLY important keywords from the text below.
-    Return them as a space-separated list.
-    No explanations. No punctuation.
+    Rules:
+    - Extract ONLY important keywords from the text below.
+    - Return them as a space-separated list.
+    - No explanations. 
+    - No punctuation.
+    - <Output> Should ONLY consist of keywords.
 
     <text>
     {text}
     </text>
+
+    <Output>
+    Output:
+    <Output>
     """
 
 
-def build_keyword_extractor(region=AWS_REGION, model_id=BEDROCK_TEXT_MODEL):
+def build_keyword_extractor():
     llm = get_text_llm()
     prompt = PromptTemplate(
         input_variables=["text"],
