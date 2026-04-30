@@ -1,54 +1,26 @@
-from langchain.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain.llms import Bedrock
 import re
-from config import AWS_REGION, BEDROCK_TEXT_MODEL
-from bedrock_client import get_text_llm
+from collections import Counter
+from typing import List
 
-def get_keyword_extraction_template():
-    return """
-    You are a keyword extractor. Analyze the given <text> and follow the rules below.
-
-    Rules:
-    - Extract ONLY important keywords from the text below.
-    - Return them as a space-separated list.
-    - No explanations. 
-    - No punctuation.
-    - <Output> Should ONLY consist of keywords.
-
-    <text>
-    {text}
-    </text>
-
-    <Output>
-    Output:
-    <Output>
-    """
+STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "into",
+    "about",
+    "have",
+    "will",
+    "your",
+    "you",
+}
 
 
-def build_keyword_extractor():
-    llm = get_text_llm()
-    prompt = PromptTemplate(
-        input_variables=["text"],
-        template=get_keyword_extraction_template()
-    )
-
-    chain = prompt | llm | StrOutputParser()
-    return chain
-
-
-def extract_keywords(text, chain):
-    raw_output = chain.invoke({"text": text})
-
-    # Clean + normalize
-    keywords = re.findall(r'\b\w+\b', raw_output.lower())
-
-    # dedupe but keep order
-    seen = set()
-    result = []
-    for w in keywords:
-        if w not in seen:
-            seen.add(w)
-            result.append(w)
-
-    return result
+def extract_keywords(text: str, top_k: int = 8) -> List[str]:
+    tokens = re.findall(r"[A-Za-z0-9가-힣_]+", text.lower())
+    tokens = [t for t in tokens if len(t) > 1 and t not in STOPWORDS]
+    counts = Counter(tokens)
+    return [token for token, _ in counts.most_common(top_k)]

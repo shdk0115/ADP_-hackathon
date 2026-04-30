@@ -1,12 +1,12 @@
-def get_decompound_rules(result_df):
-    keywords_list = []
-    for keywords in result_df['Table_Keywords']:
-        keywords_list.extend(keywords)
-    decompound_rules_df = pd.DataFrame(keywords_list, columns = ['keywords'])
-    print("Shape With Duplicates:", decompound_rules_df.shape)
+from typing import Iterable, List
 
-    decompound_rules_df = decompound_rules_df.drop_duplicates()
-    decompound_rules_list = decompound_rules_df['keywords'].tolist()
-    print("Shape Without Duplicates:", len(decompound_rules_list))
 
-    return decompound_rules_list
+def get_decompound_rules(keyword_rows: Iterable[Iterable[str]]) -> List[str]:
+    rules = []
+    seen = set()
+    for row in keyword_rows:
+        for keyword in row:
+            if keyword not in seen:
+                seen.add(keyword)
+                rules.append(keyword)
+    return rules

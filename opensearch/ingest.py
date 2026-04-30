@@ -22,7 +22,8 @@ def ingest_documents_default(client, index_name, documents):
             "_source": {
                 "meta_data": doc.get("meta_data", {}),
                 "contents": doc.get("contents", ""),
-                "embedding": doc.get("embedding", [])
+                "embedding": doc.get("embedding", []),
+                "keywords": doc.get("keywords", ""),
             }
         }
         actions.append(action)

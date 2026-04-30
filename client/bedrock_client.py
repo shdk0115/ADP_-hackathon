@@ -1,6 +1,6 @@
 from langchain.llms import Bedrock
 from langchain.embeddings import BedrockEmbeddings
-from config.config import AWS_REGION, BEDROCK_TEXT_MODEL, BEDROCK_EMBED_MODEL
+from config import AWS_REGION, BEDROCK_TEXT_MODEL, BEDROCK_EMBED_MODEL
 
 
 def get_text_llm():

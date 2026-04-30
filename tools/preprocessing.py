@@ -1,1 +1,301 @@
+from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+import hashlib
+import json
+import re
+import unicodedata
+from tools.hyde import build_hyde_document
+
+
+@dataclass
+class ChunkDocument:
+    id: str
+    meta_data: Dict
+    contents: str
+    keywords: List[str]
+    embedding: List[float]
+
+
+def _normalize_text(text: str) -> str:
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _split_korean_sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?。！？\n])\s*", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _nori_like_analyze_tokens(text: str) -> List[str]:
+    """
+    Lightweight nori-like tokenization for local preprocessing.
+    In production, replace with OpenSearch _analyze API results.
+    """
+    tokens = re.findall(r"[A-Za-z0-9가-힣]+", text.lower())
+    return [tok for tok in tokens if tok]
+
+
+def _build_dcr_terms(text: str, llm_keywords: List[str]) -> List[str]:
+    """
+    DCR generation flow:
+    1) llm keyword extraction terms
+    2) nori analyzer terms from input text
+    3) merge and augment spacing variants
+    """
+    analyzer_tokens = _nori_like_analyze_tokens(text)
+    base_terms = llm_keywords + analyzer_tokens
+
+    merged: List[str] = []
+    seen = set()
+    for term in base_terms:
+        term = term.strip().lower()
+        if not term:
+            continue
+        # original
+        if term not in seen:
+            seen.add(term)
+            merged.append(term)
+        # no-space variant
+        no_space = term.replace(" ", "")
+        if no_space and no_space not in seen:
+            seen.add(no_space)
+            merged.append(no_space)
+        # simple bi-gram spacing variant (for Korean spacing confusion)
+        if len(no_space) >= 4:
+            mid = len(no_space) // 2
+            spaced = f"{no_space[:mid]} {no_space[mid:]}"
+            if spaced not in seen:
+                seen.add(spaced)
+                merged.append(spaced)
+
+    return merged
+
+
+def parse_retail_stock_rows(text: str) -> List[Dict]:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    rows: List[Dict] = []
+    current_category = ""
+    current: Dict = {}
+
+    def _flush():
+        nonlocal current
+        if current.get("product"):
+            rows.append(current)
+        current = {}
+
+    for line in lines:
+        if line.startswith("[") and line.endswith("]"):
+            _flush()
+            current_category = line.strip("[]")
+            continue
+        if line.startswith("상품명:"):
+            _flush()
+            current = {"category": current_category, "product": line.split(":", 1)[1].strip()}
+        elif line.startswith("가격:"):
+            current["price"] = line.split(":", 1)[1].strip()
+        elif line.startswith("평점:"):
+            current["rating"] = line.split(":", 1)[1].strip()
+        elif line.startswith("해시태그:"):
+            current["hashtags"] = line.split(":", 1)[1].strip()
+        elif line.startswith("추천상황:"):
+            current["use_case"] = line.split(":", 1)[1].strip()
+    _flush()
+    return rows
+
+
+def build_concat_content(row: Dict) -> str:
+    parts = [
+        f"카테고리 {row.get('category', '')}",
+        f"상품명 {row.get('product', '')}",
+        f"가격 {row.get('price', '')}",
+        f"평점 {row.get('rating', '')}",
+        f"해시태그 {row.get('hashtags', '')}",
+        f"추천상황 {row.get('use_case', '')}",
+    ]
+    return _normalize_text(" | ".join(parts))
+
+
+def chunk_text_default_v1(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+    text = _normalize_text(text)
+    if not text:
+        return []
+
+    sentences = _split_korean_sentences(text)
+    if not sentences:
+        return []
+
+    chunks: List[str] = []
+    current = ""
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= chunk_size:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = sentence
+    if current:
+        chunks.append(current)
+
+    # Character-level overlap for retrieval stability.
+    if overlap > 0 and len(chunks) > 1:
+        overlap_chunks: List[str] = [chunks[0]]
+        for idx in range(1, len(chunks)):
+            prev_tail = chunks[idx - 1][-overlap:]
+            overlap_chunks.append(f"{prev_tail} {chunks[idx]}".strip())
+        return overlap_chunks
+    return chunks
+
+
+def load_raw_documents(raw_path: str) -> List[Dict]:
+    path = Path(raw_path)
+    if not path.exists():
+        return []
+
+    if path.is_file():
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            return []
+        return [{"source": path.name, "text": content, "meta_data": {"source": path.name}}]
+
+    docs: List[Dict] = []
+    for file_path in sorted(path.glob("*")):
+        if not file_path.is_file():
+            continue
+        content = file_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not content:
+            continue
+        docs.append(
+            {
+                "source": file_path.name,
+                "text": content,
+                "meta_data": {"source": file_path.name},
+            }
+        )
+    return docs
+
+
+def hash_embed(text: str, dim: int = 768) -> List[float]:
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    values = [(digest[i % len(digest)] / 255.0) for i in range(dim)]
+    return values
+
+
+def preprocess_default(
+    raw_docs: List[Dict],
+    embedding_fn: Optional[Callable[[str], List[float]]] = None,
+) -> List[Dict]:
+    embed = embedding_fn or hash_embed
+    records: List[Dict] = []
+    for doc in raw_docs:
+        parsed_rows = parse_retail_stock_rows(doc["text"])
+        if parsed_rows:
+            for i, row in enumerate(parsed_rows):
+                content = build_concat_content(row)
+                records.append(
+                    {
+                        "id": f"{doc['source']}-row-{i}",
+                        "meta_data": {
+                            **doc.get("meta_data", {}),
+                            "category": row.get("category", ""),
+                            "product": row.get("product", ""),
+                            "price": row.get("price", ""),
+                            "rating": row.get("rating", ""),
+                        },
+                        "contents": content,
+                        "embedding": embed(content),
+                    }
+                )
+            continue
+
+        chunks = chunk_text_default_v1(doc["text"])
+        for i, chunk in enumerate(chunks):
+            records.append(
+                {
+                    "id": f"{doc['source']}-{i}",
+                    "meta_data": doc.get("meta_data", {}),
+                    "contents": chunk,
+                    "embedding": embed(chunk),
+                }
+            )
+    return records
+
+
+def preprocess_agentic(
+    raw_docs: List[Dict],
+    embedding_fn: Optional[Callable[[str], List[float]]] = None,
+    keyword_fn: Optional[Callable[[str], List[str]]] = None,
+    use_analyzer_dcr: bool = False,
+    use_hyde: bool = False,
+    qa_sheet: Optional[List[Dict]] = None,
+    hyde_summary_fn: Optional[Callable[[str], str]] = None,
+) -> List[Dict]:
+    """
+    Agentic preprocessing for v2/v3:
+    - v2: keyword extraction + keyword column
+    - v3: analyzer+dcr style normalization to mitigate Korean spacing noise
+    """
+    embed = embedding_fn or hash_embed
+    records: List[Dict] = []
+
+    for doc in raw_docs:
+        parsed_rows = parse_retail_stock_rows(doc["text"])
+        if not parsed_rows:
+            continue
+
+        for i, row in enumerate(parsed_rows):
+            content = build_concat_content(row)
+            hyde_text = ""
+            if use_hyde:
+                hyde_text = build_hyde_document(
+                    row,
+                    qa_sheet or [],
+                    llm_summary_fn=hyde_summary_fn,
+                )
+                content = f"{content} | {hyde_text}"
+
+            keywords: List[str] = []
+            if keyword_fn is not None:
+                keywords = keyword_fn(content)
+            else:
+                tags = row.get("hashtags", "")
+                keywords = [tok.strip("#").lower() for tok in tags.split() if tok.startswith("#")]
+
+            dcr_terms: List[str] = []
+            if use_analyzer_dcr:
+                # 1) keyword extraction + 2) nori-like analysis + 3) merged spacing variants
+                dcr_terms = _build_dcr_terms(content, keywords)
+                content = _normalize_text(content)
+                content = f"{content} | dcr:{' '.join(dcr_terms)}"
+                keywords = dcr_terms
+
+            records.append(
+                {
+                    "id": f"{doc['source']}-agent-{i}",
+                    "meta_data": {
+                        **doc.get("meta_data", {}),
+                        "category": row.get("category", ""),
+                        "product": row.get("product", ""),
+                        "price": row.get("price", ""),
+                        "rating": row.get("rating", ""),
+                    },
+                    "contents": content,
+                    "keywords": " ".join(keywords),
+                    "dcr": " ".join(dcr_terms),
+                    "hyde": hyde_text,
+                    "embedding": embed(content),
+                }
+            )
+
+    return records
+
+
+def save_processed_json(records: List[Dict], output_path: str) -> None:
+    Path(output_path).write_text(
+        json.dumps(records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
