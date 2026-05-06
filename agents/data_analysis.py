@@ -61,9 +61,9 @@ VALIDATION_RULES: List[Tuple] = [
         "decision_log must be a non-empty list of strings",
     ),
     (
-        lambda s: s.get("index_version") == "v1"
+        lambda s: not s.get("use_keyword")
         or "keywords" in s.get("fields", {}),
-        "fields must include 'keywords' when index_version is v2 or v3",
+        "fields must include 'keywords' when use_keyword is true",
     ),
 ]
 
@@ -232,7 +232,7 @@ def analyze_data_with_retry(
     Returns:
       {
         "profile":  { ... },   # Step 1 결과 (데모 화면 표시용)
-        "strategy": { ... },   # Step 2 결과 
+        "strategy": { ... },   # Step 2 결과 (Paul에게 전달)
       }
     """
     sample = data_sample or user_prompt
