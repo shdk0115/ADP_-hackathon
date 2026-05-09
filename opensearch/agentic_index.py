@@ -12,7 +12,7 @@ def _base_settings():
     }
 
 
-def create_agent_index(client, index_name: str, analysis_result: dict):
+def create_agent_index(client, index_name: str, analysis_result: dict, dcr_rules: list = None):
     version = analysis_result.get("index_version", "v2")
     use_analyzer = analysis_result.get("use_analyzer_dcr", analysis_result.get("use_analyzer", False))
 
@@ -27,15 +27,17 @@ def create_agent_index(client, index_name: str, analysis_result: dict):
     }
 
     if version in {"v2", "v3"}:
-        properties["keywords"] = {"type": "text"}
+        properties["keywords"] = {"type": "text", "analyzer": "nori_custom"} if use_analyzer else {"type": "text"}
 
     body = {"settings": _base_settings(), "mappings": {"properties": properties}}
 
     if use_analyzer:
-        decompound_mode = (
-            analysis_result.get("analyzer_config", {}).get("decompound_mode", "mixed")
+        decompound_mode = analysis_result.get("analyzer_config", {}).get("decompound_mode", "mixed")
+        analyzer_settings = build_nori_analyzer_config(
+            decompound_mode=decompound_mode,
+            dcr_rules=dcr_rules or [],
         )
-        body["settings"].update(build_nori_analyzer_config(decompound_mode=decompound_mode))
+        body["settings"].update(analyzer_settings)
 
     if not client.indices.exists(index=index_name):
         client.indices.create(index=index_name, body=body)

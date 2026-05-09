@@ -27,7 +27,7 @@ def evaluate_qa_sheet(
 
     for item in qa_sheet:
         question = item.get("question", "")
-        expected = item.get("answer", "")
+        expected = item.get("answer") or item.get("expected_answer", "")
         start = time.perf_counter()
         hits = search_fn(question)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -37,7 +37,9 @@ def evaluate_qa_sheet(
         if ok:
             correct += 1
         else:
-            errors.append({"question": question, "expected": expected, "top_text": top_text})
+            errors.append(
+                {"question": question, "expected": expected, "top_text": top_text, "got": top_text}
+            )
 
     total = len(qa_sheet)
     return {

@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 
 import boto3
 
-from config import AWS_REGION, BEDROCK_TEXT_MODEL
+from config import AWS_REGION, BEDROCK_LLM_MODEL
 from prompts.data_profile import DATA_PROFILE_PROMPT
 from prompts.data_sanity import DATA_SANITY_PROMPT
 from prompts.strategy_decision import RETRY_PROMPT, STRATEGY_DECISION_PROMPT
@@ -88,7 +88,7 @@ def _get_bedrock_client():
 
 def _call_llm(prompt: str) -> str:
     client = _get_bedrock_client()
-    model_id = BEDROCK_TEXT_MODEL
+    model_id = BEDROCK_LLM_MODEL
 
     # Amazon Titan Text
     if "titan" in model_id.lower():

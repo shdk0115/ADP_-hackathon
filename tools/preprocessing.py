@@ -7,7 +7,8 @@ import hashlib
 import json
 import re
 import unicodedata
-from tools.hyde import build_hyde_document
+from tools.hyde import build_hyde_content
+from tools.add_dcr import get_decompound_rules
 
 
 @dataclass
@@ -232,12 +233,14 @@ def preprocess_agentic(
     use_analyzer_dcr: bool = False,
     use_hyde: bool = False,
     qa_sheet: Optional[List[Dict]] = None,
-    hyde_summary_fn: Optional[Callable[[str], str]] = None,
+    os_client=None,
+    dcr_index: str = "_dcr_temp",
 ) -> List[Dict]:
     """
     Agentic preprocessing for v2/v3:
     - v2: keyword extraction + keyword column
-    - v3: analyzer+dcr style normalization to mitigate Korean spacing noise
+    - v3: keywords → nori DCR rules → concat keywords + analyzed tokens (deduped)
+         + HyDE summary appended to content
     """
     embed = embedding_fn or hash_embed
     records: List[Dict] = []
@@ -251,12 +254,8 @@ def preprocess_agentic(
             content = build_concat_content(row)
             hyde_text = ""
             if use_hyde:
-                hyde_text = build_hyde_document(
-                    row,
-                    qa_sheet or [],
-                    llm_summary_fn=hyde_summary_fn,
-                )
-                content = f"{content} | {hyde_text}"
+                # content = TEXT | summary | matched questions → embed
+                content = build_hyde_content(content, qa_sheet or [])
 
             keywords: List[str] = []
             if keyword_fn is not None:
@@ -267,10 +266,12 @@ def preprocess_agentic(
 
             dcr_terms: List[str] = []
             if use_analyzer_dcr:
-                # 1) keyword extraction + 2) nori-like analysis + 3) merged spacing variants
-                dcr_terms = _build_dcr_terms(content, keywords)
-                content = _normalize_text(content)
-                content = f"{content} | dcr:{' '.join(dcr_terms)}"
+                if os_client is not None:
+                    # Use real nori analyzer: keywords → nori tokens → deduped concat
+                    dcr_terms = get_decompound_rules(keywords, os_client, dcr_index)
+                else:
+                    # Fallback: local approximation
+                    dcr_terms = _build_dcr_terms(content, keywords)
                 keywords = dcr_terms
 
             records.append(
