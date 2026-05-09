@@ -32,3 +32,12 @@ EMBEDDING_CONFIG = {
 DEFAULT_INDEX_NAME = "docs_default_v1"
 AGENT_INDEX_PREFIX = "docs_agent"
 MAX_ANALYSIS_RETRY = 3
+
+# ── 파이프라인 전략 retry ───────────────────────────
+# V1 → V2 → V3 ... 반복 최대 횟수
+MAX_PIPELINE_RETRY = int(os.getenv("MAX_PIPELINE_RETRY", "3"))
+
+# ── 목표 정확도 ─────────────────────────────────────
+# 이 점수 이상이면 파이프라인 조기 종료
+# 0~100 사이 정수, .env 또는 여기서 직접 변경 가능
+TARGET_SCORE = int(os.getenv("TARGET_SCORE", "95"))

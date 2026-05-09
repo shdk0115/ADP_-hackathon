@@ -9,6 +9,7 @@ from config import AWS_REGION, BEDROCK_TEXT_MODEL
 from prompts.data_profile import DATA_PROFILE_PROMPT
 from prompts.data_sanity import DATA_SANITY_PROMPT
 from prompts.strategy_decision import RETRY_PROMPT, STRATEGY_DECISION_PROMPT
+from prompts.strategy_refinement import STRATEGY_REFINEMENT_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,90 @@ def analyze_data_with_retry(
         return {"profile": profile, "strategy": DEFAULT_ANALYSIS_RESULT.copy()}
 
     return {"profile": profile, "strategy": strategy}
+
+
+# ──────────────────────────────────────────────
+# Strategy Refinement (V2 실패 후 전략 수정)
+# ──────────────────────────────────────────────
+def refine_strategy_from_errors(
+    current_strategy: Dict,
+    error_report: Dict,
+    max_retry: int = 3,
+) -> Dict:
+    """
+    V2 이후 평가 실패 시 에러 분석 결과로 전략을 수정.
+
+    Args:
+        current_strategy : 현재까지 사용한 Strategy JSON
+        error_report     : 평가 실패 분석 결과
+          {
+            "score": float,
+            "failed_questions": [...],
+            "error_patterns": [
+              "CONDITIONAL_REASONING_FAIL",
+              "ENTITY_MAPPING_FAIL",
+              ...
+            ]
+          }
+
+    Returns:
+        수정된 Strategy JSON (decision_log에 변경 근거 포함)
+    """
+    base_prompt = STRATEGY_REFINEMENT_PROMPT.format(
+        current_strategy=json.dumps(current_strategy, ensure_ascii=False, indent=2),
+        error_report=json.dumps(error_report, ensure_ascii=False, indent=2),
+    )
+
+    prompt = base_prompt
+    raw = ""
+    last_error = ""
+
+    for attempt in range(1, max_retry + 1):
+        try:
+            if attempt > 1:
+                prompt = RETRY_PROMPT.format(
+                    error_message=last_error,
+                    previous_response=raw,
+                ) + base_prompt
+
+            raw = _call_llm(prompt)
+            refined = _parse_json_response(raw)
+
+            # Validation 검사
+            error_msg = _validate_strategy(refined)
+            if error_msg:
+                last_error = error_msg
+                logger.warning(
+                    "[Refinement] Attempt %d validation failed: %s", attempt, error_msg
+                )
+                continue
+
+            # index_version 다운그레이드 방지
+            version_order = {"v1": 1, "v2": 2, "v3": 3}
+            curr_v = version_order.get(current_strategy.get("index_version", "v1"), 1)
+            new_v  = version_order.get(refined.get("index_version", "v1"), 1)
+            if new_v < curr_v:
+                last_error = (
+                    f"index_version downgrade not allowed: "
+                    f"{current_strategy['index_version']} → {refined['index_version']}"
+                )
+                logger.warning("[Refinement] Attempt %d: %s", attempt, last_error)
+                continue
+
+            logger.info("[Refinement] Success on attempt %d", attempt)
+            return refined
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            last_error = str(e)
+            logger.warning("[Refinement] Attempt %d parse failed: %s", attempt, last_error)
+
+    # Fallback: 현재 전략 유지 + log 추가
+    logger.error("[Refinement] Failed after %d retries, keeping current strategy", max_retry)
+    fallback = current_strategy.copy()
+    fallback["decision_log"] = current_strategy.get("decision_log", []) + [
+        f"Refinement failed after {max_retry} retries — current strategy retained."
+    ]
+    return fallback
 
 
 # ──────────────────────────────────────────────

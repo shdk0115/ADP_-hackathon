@@ -1,0 +1,56 @@
+[
+  {
+    "id": "Q1",
+    "question": "밤 11시 30분에 퇴근했는데 택시비 얼마까지 받을 수 있어?",
+    "expected_answer": "30,000원",
+    "difficulty": "하",
+    "checkpoint": "V1 통과 대조군. 단순 벡터 검색으로 정답 도출 가능 여부 확인.",
+    "dirty_data": true,
+    "dirty_note": "복지규정 문서에 40,000원으로 오기재. 실제 정답 30,000원과 불일치. Data Sanity 시나리오용."
+  },
+  {
+    "id": "Q2",
+    "question": "2024년 5월에 입사한 직원이 결혼하면 경조사비 지원금이 얼마야?",
+    "expected_answer": "500,000원",
+    "difficulty": "중",
+    "checkpoint": "조건부 추론. 기본값 100만원 대신 2025년 이전 입사자 특례(50만원)를 찾아내는지 확인.",
+    "dirty_data": false,
+    "dirty_note": ""
+  },
+  {
+    "id": "Q3",
+    "question": "예전 AI 유닛 소속인데 500만 원짜리 장비를 사려고 해. 팀장님 전결로 처리 가능해?",
+    "expected_answer": "불가능 (실장 전결 필요)",
+    "difficulty": "상",
+    "checkpoint": "엔티티 매핑 + 우선순위. AI 유닛=AIR 유닛 인지 여부 및 특례 조항 우선 적용 여부 확인.",
+    "dirty_data": false,
+    "dirty_note": ""
+  },
+  {
+    "id": "Q4",
+    "question": "현재 사내 규정상 매달 지원되는 도서 구입비 한도는 얼마야?",
+    "expected_answer": "50,000원",
+    "difficulty": "최상",
+    "checkpoint": "데이터 정합성 진단. 문서상 중단으로 기재되어 있으나 QA 정답과 대조해 데이터 오류를 지적해야 함.",
+    "dirty_data": true,
+    "dirty_note": "복지규정 문서에 지원 중단으로 오기재. 실제 정답 50,000원과 불일치. Data Sanity 핵심 시나리오."
+  },
+  {
+    "id": "Q5",
+    "question": "2025년 6월 입사자가 본인 결혼 시 받을 수 있는 금액은?",
+    "expected_answer": "1,000,000원",
+    "difficulty": "중",
+    "checkpoint": "날짜 경계값 분석. 2025년 이전(24년까지)이 아닌 경우 기본 규정(100만원) 적용 확인.",
+    "dirty_data": false,
+    "dirty_note": ""
+  },
+  {
+    "id": "Q6",
+    "question": "일반 부서(마케팅팀)에서 3,000만 원짜리 서버를 살 때 누구 승인을 받아야 해?",
+    "expected_answer": "실장",
+    "difficulty": "중",
+    "checkpoint": "표 데이터 추출. CSV 금액 구간별(1000만~5000만) 전결권자 데이터 정확히 리트리벌하는지 확인.",
+    "dirty_data": false,
+    "dirty_note": ""
+  }
+]
