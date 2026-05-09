@@ -16,18 +16,19 @@ def create_agent_index(client, index_name: str, analysis_result: dict, dcr_rules
     version = analysis_result.get("index_version", "v2")
     use_analyzer = analysis_result.get("use_analyzer_dcr", analysis_result.get("use_analyzer", False))
 
+    text_field = {"type": "text", "analyzer": "nori_custom"} if use_analyzer else {"type": "text"}
+    keyword_field = {"type": "text", "analyzer": "nori_custom"} if use_analyzer else {"type": "text"}
+
     properties = {
-        "meta_data": {"type": "object"},
-        "contents": {"type": "text"},
+        "meta_info": {"type": "object"},
+        "TEXT": text_field,
+        "keyword": keyword_field,
         "embedding": {
             "type": "knn_vector",
             "dimension": EMBEDDING_CONFIG["dimension"],
             "similarity": EMBEDDING_CONFIG["similarity"],
         },
     }
-
-    if version in {"v2", "v3"}:
-        properties["keywords"] = {"type": "text", "analyzer": "nori_custom"} if use_analyzer else {"type": "text"}
 
     body = {"settings": _base_settings(), "mappings": {"properties": properties}}
 

@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
-import hashlib
 import json
 import re
 import unicodedata
 from tools.hyde import build_hyde_content
-from tools.add_dcr import get_decompound_rules
+from tools.add_dcr import get_decompound_rules, expand_keywords_with_dcr
+from tools.file_reader import read_raw_data
 
 
 @dataclass
@@ -152,45 +152,51 @@ def chunk_text_default_v1(text: str, chunk_size: int = 500, overlap: int = 50) -
     return chunks
 
 
+def _read_one(file_path: Path) -> str:
+    try:
+        text = read_raw_data(str(file_path), filename=file_path.name)
+    except Exception:
+        return ""
+    return (text or "").strip()
+
+
 def load_raw_documents(raw_path: str) -> List[Dict]:
+    """Read TXT / CSV / XLSX / PDF (single file or directory) into doc records."""
     path = Path(raw_path)
     if not path.exists():
         return []
 
     if path.is_file():
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
+        text = _read_one(path)
+        if not text:
             return []
-        return [{"source": path.name, "text": content, "meta_data": {"source": path.name}}]
+        return [{"source": path.name, "text": text, "meta_data": {"source": path.name}}]
 
     docs: List[Dict] = []
     for file_path in sorted(path.glob("*")):
         if not file_path.is_file():
             continue
-        content = file_path.read_text(encoding="utf-8", errors="ignore").strip()
-        if not content:
+        text = _read_one(file_path)
+        if not text:
             continue
         docs.append(
             {
                 "source": file_path.name,
-                "text": content,
+                "text": text,
                 "meta_data": {"source": file_path.name},
             }
         )
     return docs
 
 
-def hash_embed(text: str, dim: int = 768) -> List[float]:
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    values = [(digest[i % len(digest)] / 255.0) for i in range(dim)]
-    return values
+from tools.embedding import embed as bedrock_embed  # cached Titan v2 client
 
 
 def preprocess_default(
     raw_docs: List[Dict],
     embedding_fn: Optional[Callable[[str], List[float]]] = None,
 ) -> List[Dict]:
-    embed = embedding_fn or hash_embed
+    embed = embedding_fn or bedrock_embed
     records: List[Dict] = []
     for doc in raw_docs:
         parsed_rows = parse_retail_stock_rows(doc["text"])
@@ -200,26 +206,26 @@ def preprocess_default(
                 records.append(
                     {
                         "id": f"{doc['source']}-row-{i}",
-                        "meta_data": {
+                        "meta_info": {
                             **doc.get("meta_data", {}),
                             "category": row.get("category", ""),
                             "product": row.get("product", ""),
                             "price": row.get("price", ""),
                             "rating": row.get("rating", ""),
                         },
-                        "contents": content,
+                        "content": content,
                         "embedding": embed(content),
                     }
                 )
             continue
 
-        chunks = chunk_text_default_v1(doc["text"])
+        chunks = chunk_text_default_v1(doc["text"], chunk_size=500, overlap=0)
         for i, chunk in enumerate(chunks):
             records.append(
                 {
                     "id": f"{doc['source']}-{i}",
-                    "meta_data": doc.get("meta_data", {}),
-                    "contents": chunk,
+                    "meta_info": doc.get("meta_data", {}),
+                    "content": chunk,
                     "embedding": embed(chunk),
                 }
             )
@@ -242,52 +248,74 @@ def preprocess_agentic(
     - v3: keywords → nori DCR rules → concat keywords + analyzed tokens (deduped)
          + HyDE summary appended to content
     """
-    embed = embedding_fn or hash_embed
+    embed = embedding_fn or bedrock_embed
     records: List[Dict] = []
 
     for doc in raw_docs:
         parsed_rows = parse_retail_stock_rows(doc["text"])
-        if not parsed_rows:
+
+        if parsed_rows:
+            # Retail-style structured rows
+            for i, row in enumerate(parsed_rows):
+                content = build_concat_content(row)
+                hyde_text = ""
+                if use_hyde:
+                    content = build_hyde_content(content, qa_sheet or [])
+
+                if keyword_fn is not None:
+                    keywords = keyword_fn(content)
+                else:
+                    tags = row.get("hashtags", "")
+                    keywords = [tok.strip("#").lower() for tok in tags.split() if tok.startswith("#")]
+
+                dcr_terms: List[str] = []
+                if use_analyzer_dcr:
+                    if os_client is not None:
+                        dcr_terms = expand_keywords_with_dcr(keywords, os_client, dcr_index)
+                    else:
+                        dcr_terms = _build_dcr_terms(content, keywords)
+                    keywords = dcr_terms
+
+                records.append(
+                    {
+                        "id": f"{doc['source']}-agent-{i}",
+                        "metainfo": {
+                            **doc.get("meta_data", {}),
+                            "category": row.get("category", ""),
+                            "product": row.get("product", ""),
+                            "price": row.get("price", ""),
+                            "rating": row.get("rating", ""),
+                        },
+                        "TEXT": content,
+                        "keyword": " ".join(keywords),
+                        "embedding": embed(content),
+                    }
+                )
             continue
 
-        for i, row in enumerate(parsed_rows):
-            content = build_concat_content(row)
-            hyde_text = ""
+        # Fallback: free-text / PDF / Excel-as-text → sentence chunking
+        chunks = chunk_text_default_v1(doc["text"], chunk_size=500, overlap=0)
+        for i, chunk in enumerate(chunks):
+            content = chunk
             if use_hyde:
-                # content = TEXT | summary | matched questions → embed
                 content = build_hyde_content(content, qa_sheet or [])
 
-            keywords: List[str] = []
-            if keyword_fn is not None:
-                keywords = keyword_fn(content)
-            else:
-                tags = row.get("hashtags", "")
-                keywords = [tok.strip("#").lower() for tok in tags.split() if tok.startswith("#")]
+            keywords = keyword_fn(content) if keyword_fn is not None else []
 
-            dcr_terms: List[str] = []
+            dcr_terms = []
             if use_analyzer_dcr:
                 if os_client is not None:
-                    # Use real nori analyzer: keywords → nori tokens → deduped concat
-                    dcr_terms = get_decompound_rules(keywords, os_client, dcr_index)
+                    dcr_terms = expand_keywords_with_dcr(keywords, os_client, dcr_index)
                 else:
-                    # Fallback: local approximation
                     dcr_terms = _build_dcr_terms(content, keywords)
                 keywords = dcr_terms
 
             records.append(
                 {
                     "id": f"{doc['source']}-agent-{i}",
-                    "meta_data": {
-                        **doc.get("meta_data", {}),
-                        "category": row.get("category", ""),
-                        "product": row.get("product", ""),
-                        "price": row.get("price", ""),
-                        "rating": row.get("rating", ""),
-                    },
-                    "contents": content,
-                    "keywords": " ".join(keywords),
-                    "dcr": " ".join(dcr_terms),
-                    "hyde": hyde_text,
+                    "metainfo": doc.get("meta_data", {}),
+                    "TEXT": content,
+                    "keyword": " ".join(keywords),
                     "embedding": embed(content),
                 }
             )

@@ -1,35 +1,53 @@
 from opensearchpy import helpers
 
-def ingest_documents_default(client, index_name, documents):
-    """
-    documents: List[Dict]
-    Example:
-    [
+def _bulk_ingest(client, index_name, actions):
+    helpers.bulk(client, actions)
+    print(f"✅ Ingested {len(actions)} documents into {index_name}")
+
+def ingest_documents_v1(client, index_name, documents):
+    """V1: meta_info/content/embedding → stored as meta_info/TEXT/embedding."""
+    actions = [
         {
-            "meta_data": {...},
-            "contents": "text chunk",
-            "embedding": [float vector]
-        }
-    ]
-    """
-
-    actions = []
-
-    for i, doc in enumerate(documents):
-        action = {
             "_index": index_name,
             "_id": doc.get("id", i),
             "_source": {
-                "meta_data": doc.get("meta_data", {}),
-                "contents": doc.get("contents", ""),
+                "meta_info": doc.get("meta_info", {}),
+                "TEXT": doc.get("content", ""),
                 "embedding": doc.get("embedding", []),
-                "keywords": doc.get("keywords", ""),
             }
         }
-        actions.append(action)
+        for i, doc in enumerate(documents)
+    ]
+    _bulk_ingest(client, index_name, actions)
 
-    helpers.bulk(client, actions)
-    print(f"✅ Ingested {len(actions)} documents into {index_name}")
+def ingest_documents_v2(client, index_name, documents):
+    """V2: read preprocess_agentic output (metainfo/TEXT/keyword/embedding).
+    OS에는 TEXT 와 keyword 둘 다 '본문+키워드+DCR' 통합 텍스트로 저장 →
+    search_v2(match: keyword) / evaluator(read: TEXT) 둘 다 만족."""
+    actions = []
+    for i, doc in enumerate(documents):
+        text = (doc.get("TEXT", "") or "").strip()
+        keyword = (doc.get("keyword", "") or "").strip()
+        merged = f"{text} {keyword}".strip() if (text or keyword) else ""
+        actions.append({
+            "_index": index_name,
+            "_id": doc.get("id", i),
+            "_source": {
+                "meta_info": doc.get("metainfo", {}),
+                "TEXT": merged,
+                "keyword": merged,
+                "embedding": doc.get("embedding", []),
+            }
+        })
+    _bulk_ingest(client, index_name, actions)
+
+def ingest_documents_v3(client, index_name, documents):
+    """V3: same fields as V2 — search_v3 uses knn + termvectors(keyword) re-rank."""
+    ingest_documents_v2(client, index_name, documents)
+
+def ingest_documents_default(client, index_name, documents):
+    """Legacy wrapper — delegates to v1."""
+    ingest_documents_v1(client, index_name, documents)
 
 # List Index 
 def list_index_mappings(client, index_name):

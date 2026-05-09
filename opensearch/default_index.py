@@ -13,10 +13,10 @@ def create_index_v1(client, index_name="documents"):
             },
             "mappings": {
                 "properties": {
-                    "meta_data": {
+                    "meta_info": {
                         "type": "object"
                     },
-                    "contents": {
+                    "TEXT": {
                         "type": "text"
                     },
                     "embedding": {

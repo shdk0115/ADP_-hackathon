@@ -6,10 +6,11 @@ from config import AWS_REGION, BEDROCK_LLM_MODEL
 
 
 def _call_llm(prompt: str) -> str:
+    print(f"  🤖 LLM 호출 [hyde] ({len(prompt)}자)")
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1024,
+        "max_tokens": 4096,
         "temperature": 0.0,
         "messages": [{"role": "user", "content": prompt}],
     })
@@ -31,13 +32,26 @@ def summarize_text(text: str) -> str:
         return ""
 
 
+def _qa_question(qa) -> str:
+    """Extract a question string from a qa item that may be a dict or a plain str."""
+    if isinstance(qa, dict):
+        return str(qa.get("question") or qa.get("질문") or qa.get("Q") or "").strip()
+    if isinstance(qa, str):
+        return qa.strip()
+    return ""
+
+
 def match_questions(text: str, qa_sheet: List[dict]) -> List[str]:
     if not qa_sheet:
         return []
-    questions_json = json.dumps(
-        [{"id": i, "question": qa["question"]} for i, qa in enumerate(qa_sheet)],
-        ensure_ascii=False,
-    )
+    items = []
+    for i, qa in enumerate(qa_sheet):
+        q = _qa_question(qa)
+        if q:
+            items.append({"id": i, "question": q})
+    if not items:
+        return []
+    questions_json = json.dumps(items, ensure_ascii=False)
     prompt = (
         f"Given the TEXT below, return the IDs of questions from the list that this text can answer.\n"
         f"Return ONLY a JSON array of IDs, e.g. [0, 2, 5]. No explanation.\n\n"
@@ -46,7 +60,13 @@ def match_questions(text: str, qa_sheet: List[dict]) -> List[str]:
     try:
         raw = _call_llm(prompt)
         ids = json.loads(re.search(r"\[.*?\]", raw, re.DOTALL).group())
-        return [qa_sheet[i]["question"] for i in ids if 0 <= i < len(qa_sheet)]
+        out = []
+        for i in ids:
+            if 0 <= i < len(qa_sheet):
+                q = _qa_question(qa_sheet[i])
+                if q:
+                    out.append(q)
+        return out
     except Exception:
         return []
 

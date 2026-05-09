@@ -5,7 +5,8 @@ import time
 def _get_first_hit_text(hits: List[Dict]) -> str:
     if not hits:
         return ""
-    return hits[0].get("_source", {}).get("contents", "")
+    src = hits[0].get("_source", {})
+    return src.get("TEXT") or src.get("contents", "")
 
 
 def evaluate_qa_sheet(

@@ -1,4 +1,6 @@
-def default_hybrid_search(client, index_name, query, query_vector, size=5):
+from config import SEARCH_K
+
+def default_hybrid_search(client, index_name, query, query_vector, size=SEARCH_K):
     body = {
         "size": size,
         "query": {
@@ -6,7 +8,7 @@ def default_hybrid_search(client, index_name, query, query_vector, size=5):
                 "should": [
                     {
                         "match": {
-                            "contents": {
+                            "TEXT": {
                                 "query": query,
                                 "boost": 0.5
                             }

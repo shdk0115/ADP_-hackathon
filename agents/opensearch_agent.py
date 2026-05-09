@@ -10,7 +10,7 @@ def enrich_docs_for_agent_index(documents: List[Dict], use_keyword: bool) -> Lis
     for doc in documents:
         row = dict(doc)
         if use_keyword:
-            row["keywords"] = " ".join(extract_keywords(row.get("contents", "")))
+            row["keyword"] = " ".join(extract_keywords(row.get("TEXT", "")))
         enriched.append(row)
     return enriched
 

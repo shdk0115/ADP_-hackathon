@@ -6,6 +6,7 @@ from config import AWS_REGION, BEDROCK_LLM_MODEL
 
 
 def extract_keywords(text: str) -> List[str]:
+    print(f"  🤖 LLM 호출 [extract_keywords] ({len(text)}자)")
     prompt = (
         f"Extract all significant keywords from the text below.\n"
         f"Return ONLY the keywords delimited by whitespace. No explanation, no punctuation.\n\n"

@@ -89,6 +89,7 @@ def _get_bedrock_client():
 def _call_llm(prompt: str) -> str:
     client = _get_bedrock_client()
     model_id = BEDROCK_LLM_MODEL
+    print(f"  🤖 LLM 호출 [{model_id}] ({len(prompt)}자)")
 
     # Amazon Titan Text
     if "titan" in model_id.lower():
@@ -113,7 +114,7 @@ def _call_llm(prompt: str) -> str:
     if "claude" in model_id.lower() or "anthropic" in model_id.lower():
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 1024,
+            "max_tokens": 4096,
             "temperature": 0.0,
             "messages": [{"role": "user", "content": prompt}],
         })
@@ -164,9 +165,12 @@ def _run_data_profiling(
             profile = _parse_json_response(raw)
             logger.info("[Profiling] Success on attempt %d", attempt)
             return profile
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            last_error = str(e)
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
             logger.warning("[Profiling] Attempt %d failed: %s", attempt, last_error)
+            print(f"  ⚠️ [Profiling] attempt {attempt}/{max_retry} failed: {last_error}")
+            if raw:
+                print(f"     raw response (first 200 chars): {raw[:200]!r}")
 
     raise RuntimeError(f"Data profiling failed after {max_retry} retries. Last error: {last_error}")
 
@@ -198,14 +202,18 @@ def _run_strategy_decision(profile: Dict, max_retry: int) -> Dict:
             if error_msg:
                 last_error = error_msg
                 logger.warning("[Strategy] Attempt %d validation failed: %s", attempt, error_msg)
+                print(f"  ⚠️ [Strategy] attempt {attempt}/{max_retry} validation failed: {error_msg}")
                 continue
 
             logger.info("[Strategy] Success on attempt %d", attempt)
             return strategy
 
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            last_error = str(e)
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
             logger.warning("[Strategy] Attempt %d parse failed: %s", attempt, last_error)
+            print(f"  ⚠️ [Strategy] attempt {attempt}/{max_retry} failed: {last_error}")
+            if raw:
+                print(f"     raw response (first 200 chars): {raw[:200]!r}")
 
     raise RuntimeError(
         f"Strategy decision failed after {max_retry} retries. Last error: {last_error}"
@@ -249,6 +257,7 @@ def analyze_data_with_retry(
         )
     except RuntimeError as e:
         logger.error("[analyze] Profiling failed, using fallback. Reason: %s", e)
+        print(f"  ❌ Profiling 모든 retry 실패 → fallback 적용. Reason: {e}")
         return {"profile": {}, "strategy": DEFAULT_ANALYSIS_RESULT.copy()}
 
     # Step 2: Strategy Decision
@@ -256,6 +265,7 @@ def analyze_data_with_retry(
         strategy = _run_strategy_decision(profile=profile, max_retry=max_retry)
     except RuntimeError as e:
         logger.error("[analyze] Strategy decision failed, using fallback. Reason: %s", e)
+        print(f"  ❌ Strategy decision 모든 retry 실패 → fallback 적용. Reason: {e}")
         return {"profile": profile, "strategy": DEFAULT_ANALYSIS_RESULT.copy()}
 
     return {"profile": profile, "strategy": strategy}
@@ -405,3 +415,96 @@ def diagnose_data_sanity(
         "items": [],
         "summary": "데이터 정합성 진단 실패 — 수동 검토 필요",
     }
+
+
+# ──────────────────────────────────────────────
+# Agentic Analysis via MCP Tool-Use
+
+# ──────────────────────────────────────────────
+# Agentic Analysis via MCP Tool-Use
+# ──────────────────────────────────────────────
+def run_agentic_analysis(
+    user_prompt: str,
+    data_sample: str,
+    version: str,
+    os_client=None,
+    qa_sheet: list = None,
+    error_patterns: list = None,
+    max_iterations: int = 10,
+) -> Dict:
+    """
+    Calls the data analyst agent with MCP tool-use for a given version (v2 or v3).
+    Always returns a strategy — falls back to DEFAULT_ANALYSIS_RESULT on any failure.
+    """
+    from tools.mcp_tools import TOOL_SCHEMAS, dispatch_tool
+
+    bedrock = _get_bedrock_client()
+    model_id = BEDROCK_LLM_MODEL
+
+    system = (
+        "You are a data analyst agent for an OpenSearch RAG pipeline. "
+        "Analyse the provided data sample and decide the best indexing strategy. "
+        f"You are preparing strategy for index version: {version}. "
+        "Use the available tools to extract keywords, build HyDE content, or generate DCR rules as needed. "
+        "When done, output ONLY a JSON strategy object (no markdown fences) with keys: "
+        "index_version, use_keyword, use_vector, use_hybrid, use_analyzer, use_hyde, use_dcr, "
+        "fields, analyzer_config, chunking_strategy, decision_log."
+    )
+
+    error_note = f"\n\nPrevious version error patterns to address: {error_patterns}" if error_patterns else ""
+    user_content = f"{user_prompt}{error_note}\n\nData sample:\n{data_sample[:3000]}"
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        for _ in range(max_iterations):
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,
+                "temperature": 0.0,
+                "system": system,
+                "tools": TOOL_SCHEMAS,
+                "messages": messages,
+            })
+            response = json.loads(
+                bedrock.invoke_model(
+                    modelId=model_id, body=body,
+                    contentType="application/json", accept="application/json",
+                )["body"].read()
+            )
+
+            stop_reason = response.get("stop_reason")
+            content     = response.get("content", [])
+            messages.append({"role": "assistant", "content": content})
+
+            if stop_reason == "tool_use":
+                tool_results = []
+                for block in content:
+                    if block.get("type") != "tool_use":
+                        continue
+                    print(f"  🔧 [{version}] tool_use → {block['name']}({list(block['input'].keys())})")
+                    result = dispatch_tool(block["name"], block["input"], os_client=os_client)
+                    print(f"  ✅ [{version}] tool_result ← {str(result)[:80]}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
+                messages.append({"role": "user", "content": tool_results})
+                continue
+
+            # end_turn or any other stop — parse strategy from text blocks
+            for block in content:
+                if block.get("type") == "text":
+                    try:
+                        strategy = _parse_json_response(block["text"])
+                        if not _validate_strategy(strategy):
+                            return strategy
+                    except Exception:
+                        pass
+            break
+
+    except Exception as e:
+        logger.warning("[agentic_analyze] Agent failed for %s: %s — using fallback", version, e)
+
+    logger.warning("[agentic_analyze] Using fallback strategy for %s", version)
+    return {**DEFAULT_ANALYSIS_RESULT, "index_version": version}

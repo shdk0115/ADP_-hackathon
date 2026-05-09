@@ -13,7 +13,7 @@ if load_dotenv is not None:
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 BEDROCK_LLM_MODEL = os.getenv("BEDROCK_LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
-BEDROCK_EMBED_MODEL = os.getenv("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v1")
+BEDROCK_EMBED_MODEL = os.getenv("BEDROCK_EMBED_MODEL", "amazon.titan-embed-text-v2:0")
 
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
@@ -28,7 +28,7 @@ OPENSEARCH_DEFAULTS = {
 }
 
 EMBEDDING_CONFIG = {
-    "dimension": 768,
+    "dimension": 1024,
     "similarity": "cosine",
 }
 
@@ -44,3 +44,4 @@ MAX_PIPELINE_RETRY = int(os.getenv("MAX_PIPELINE_RETRY", "3"))
 # 이 점수 이상이면 파이프라인 조기 종료
 # 0~100 사이 정수, .env 또는 여기서 직접 변경 가능
 TARGET_SCORE = int(os.getenv("TARGET_SCORE", "95"))
+SEARCH_K = int(os.getenv("SEARCH_K", "3"))

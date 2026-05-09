@@ -1,33 +1,29 @@
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from agents.data_analysis import (
-    analyze_data_with_retry,
-    diagnose_data_sanity,
-    refine_strategy_from_errors,
-)
+from evaluation.error_analysis import analyze_errors
 from config import (
-    MAX_ANALYSIS_RETRY,
-    MAX_PIPELINE_RETRY,
     OPENSEARCH_HOST,
     OPENSEARCH_PASSWORD,
     OPENSEARCH_PORT,
     OPENSEARCH_USER,
     OPENSEARCH_USE_SSL,
+    SEARCH_K,
     TARGET_SCORE,
 )
-from evaluation.error_analysis import analyze_errors
 from evaluation.evaluator import evaluate_qa_sheet
 from opensearch.agentic_index import create_agent_index
-from opensearch.agentic_search import agent_hybrid_search
+from opensearch.agentic_search import search_v2, search_v3
 from opensearch.default_index import create_index_v1
 from opensearch.default_search import default_hybrid_search
-from opensearch.ingest import ingest_documents_default
+from opensearch.ingest import ingest_documents_v1, ingest_documents_v2, ingest_documents_v3
 from prompts.domain.corporate import CORPORATE_DOMAIN_HINT, CORPORATE_FEW_SHOT
 from tools.add_dcr import get_decompound_rules
+from tools.file_reader import read_qa_sheet_excel, read_qa_sheet_pdf
 from tools.keyword_extraction import extract_keywords
-from tools.preprocessing import hash_embed, load_raw_documents, preprocess_agentic, preprocess_default
+from tools.preprocessing import bedrock_embed, load_raw_documents, preprocess_agentic, preprocess_default
 
 try:
     from opensearchpy import OpenSearch
@@ -35,6 +31,19 @@ except ImportError:
     OpenSearch = None
 
 BASE_DIR = Path(__file__).resolve().parent
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+
+DEFAULT_STRATEGY = {
+    "use_keyword": False,
+    "use_vector": True,
+    "use_hybrid": False,
+    "use_analyzer": False,
+    "use_hyde": False,
+    "use_dcr": False,
+    "fields": {"meta_info": "object", "TEXT": "text", "embedding": "knn_vector"},
+    "chunking_strategy": "fixed",
+    "decision_log": ["Sequential fixed strategy."],
+}
 
 
 def _resolve_data_path(rel_or_abs: str) -> str:
@@ -47,9 +56,30 @@ def _resolve_data_path(rel_or_abs: str) -> str:
 # ──────────────────────────────────────────────────────
 def _load_qa_sheet(path: str) -> List[Dict]:
     p = Path(path)
-    if not p.exists() or not p.read_text(encoding="utf-8").strip():
+    if not p.exists():
         return []
-    return json.loads(p.read_text(encoding="utf-8"))
+    ext = p.suffix.lower()
+    if ext in (".xlsx", ".xls", ".csv"):
+        return read_qa_sheet_excel(str(p), filename=p.name)
+    if ext == ".pdf":
+        print(f"  📄 PDF QA detected → LLM 추출 시작 ({p.name})")
+        pairs = read_qa_sheet_pdf(str(p), filename=p.name)
+        print(f"  📄 PDF QA 추출 완료: {len(pairs)}개")
+        return pairs
+    if ext == ".json":
+        for enc in ("utf-8", "cp949", "euc-kr"):
+            try:
+                raw = p.read_text(encoding=enc).strip()
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"QA JSON 디코딩 실패 (utf-8/cp949/euc-kr 모두 실패): {p.name}")
+        return json.loads(raw) if raw else []
+    raise ValueError(
+        f"지원하지 않는 QA 파일 포맷: '{ext}' ({p.name}). "
+        f"엑셀(.xlsx/.xls), CSV, PDF, JSON만 지원합니다."
+    )
 
 
 def _get_client():
@@ -100,28 +130,17 @@ def _print_eval_row(version: str, score: float, eval_result: Dict) -> None:
 # ──────────────────────────────────────────────────────
 # 검색 함수
 # ──────────────────────────────────────────────────────
-def _keyword_exposure_count(client, index_name, doc_id, query_tokens):
-    tv = client.termvectors(index=index_name, id=doc_id, fields=["keywords"], term_statistics=True)
-    terms = tv.get("term_vectors", {}).get("keywords", {}).get("terms", {})
-    return sum(terms.get(tok, {}).get("term_freq", 0) for tok in query_tokens)
-
-
-def _search_v1(client, index_name, query, size=5):
-    qv = hash_embed(query)
+def _search_v1(client, index_name, query, size=SEARCH_K):
+    qv = bedrock_embed(query)
     return default_hybrid_search(client, index_name, query, qv, size=size)
 
 
-def _search_agent(client, index_name, query, strategy, size=5):
-    qv = hash_embed(query)
-    use_keyword = strategy.get("use_keyword", False)
-    hits = agent_hybrid_search(client, index_name, query, qv, use_keyword=use_keyword, size=size * 2)
-    if use_keyword:
-        query_tokens = extract_keywords(query, top_k=10)
-        for hit in hits:
-            freq = _keyword_exposure_count(client, index_name, hit["_id"], query_tokens)
-            hit["_score"] = float(hit.get("_score", 0.0)) + (1.5 * freq)
-        hits.sort(key=lambda x: x.get("_score", 0.0), reverse=True)
-    return hits[:size]
+def _search_agent(client, index_name, query, strategy, size=SEARCH_K):
+    qv = bedrock_embed(query)
+    version = strategy.get("index_version", "v2")
+    if version == "v3":
+        return search_v3(client, index_name, query, qv, size=size)
+    return search_v2(client, index_name, query, qv, size=size)
 
 
 # ──────────────────────────────────────────────────────
@@ -134,176 +153,92 @@ def run_pipeline(
 ) -> Dict:
 
     raw_path = _resolve_data_path(raw_data_path)
-    qa_path = _resolve_data_path(qa_sheet_path)
+    qa_path  = _resolve_data_path(qa_sheet_path)
 
     raw_docs = load_raw_documents(raw_path)
     qa_sheet = _load_qa_sheet(qa_path)
     client   = _get_client()
 
     _sep("ADP 해커톤 파이프라인 시작")
-    print(f"  Target Score     : {TARGET_SCORE}점")
-    print(f"  Max Pipeline Retry: {MAX_PIPELINE_RETRY}회")
-    print(f"  QA 문항 수       : {len(qa_sheet)}개")
+    print(f"  Target Score : {TARGET_SCORE}점")
+    print(f"  QA 문항 수   : {len(qa_sheet)}개")
 
-    # ── STEP 1: 데이터 분석 ────────────────────────────
-    _sep("STEP 1 : 데이터 분석")
+    eval_history: Dict = {}
 
-    with open(raw_path, encoding="utf-8") as f:
-        data_sample = f.read()
-
-    analysis_result = analyze_data_with_retry(
-        user_prompt=user_prompt,
-        data_sample=data_sample,
-        max_retry=MAX_ANALYSIS_RETRY,
-        domain_hint=CORPORATE_DOMAIN_HINT,
-        few_shot=CORPORATE_FEW_SHOT,
-    )
-    profile  = analysis_result["profile"]
-    strategy = analysis_result["strategy"]
-
-    print(f"  도메인    : {profile.get('domain', {}).get('type', 'unknown')}")
-    print(f"  언어      : {profile.get('language', {}).get('primary', 'unknown')}")
-    print(f"  복잡도    : {profile.get('content', {}).get('semantic_complexity', 'unknown')}")
-    print()
-    _print_decision_log(strategy.get("decision_log", []))
-    print(f"\n  확정 전략 : {strategy['index_version']} | "
-          f"keyword:{strategy['use_keyword']} | "
-          f"analyzer:{strategy['use_analyzer']} | "
-          f"hyde:{strategy['use_hyde']}")
-
-    # ── STEP 2: V1 Baseline ────────────────────────────
-    _sep("STEP 2 : V1 Baseline")
+    # ── STEP 1: V1 Baseline ────────────────────────────
+    _sep("STEP 1 : V1 Baseline")
     print("  방식: 표준 인덱스 + 표준 벡터 검색 (전략 미적용)")
 
     v1_index = "adp_v1"
-    default_docs = preprocess_default(raw_docs, embedding_fn=hash_embed)
+    v1_docs  = preprocess_default(raw_docs, embedding_fn=bedrock_embed)
     _reset_index(client, v1_index)
     create_index_v1(client, v1_index)
-    ingest_documents_default(client, v1_index, default_docs)
+    ingest_documents_v1(client, v1_index, v1_docs)
     client.indices.refresh(index=v1_index)
 
     v1_eval  = evaluate_qa_sheet(qa_sheet, search_fn=lambda q: _search_v1(client, v1_index, q))
     v1_score = _score(v1_eval)
+    eval_history["v1"] = v1_eval
     _print_eval_row("V1", v1_score, v1_eval)
 
-    if v1_score >= TARGET_SCORE:
-        _sep("완료")
-        print(f"  ✅ V1에서 목표 달성! ({v1_score}점)")
-        return _build_result("v1", strategy, {"v1": v1_eval})
+    # ── STEP 2: V2 (Keyword + Vector) ─────────────────
+    _sep("STEP 2 : V2 (Keyword + Vector)")
+    strategy_v2 = {**DEFAULT_STRATEGY, "index_version": "v2",
+                   "use_keyword": True, "use_analyzer": False, "use_hyde": False, "use_dcr": False}
+    print(f"  방식: 키워드 추출 + 벡터 검색")
 
-    # ── STEP 3: 피드백 기반 Agentic 루프 ───────────────
-    eval_history = {"v1": v1_eval}
-    current_strategy = strategy
-    best_score = v1_score
-    best_version = "v1"
+    v2_docs  = preprocess_agentic(raw_docs, keyword_fn=extract_keywords, embedding_fn=bedrock_embed)
+    v2_index = "adp_v2"
+    _reset_index(client, v2_index)
+    create_agent_index(client, v2_index, strategy_v2)
+    ingest_documents_v2(client, v2_index, v2_docs)
+    client.indices.refresh(index=v2_index)
 
-    for retry in range(1, MAX_PIPELINE_RETRY + 1):
-        version = f"v{retry + 1}"
-        _sep(f"STEP {retry + 2} : {version.upper()} Agentic (retry {retry}/{MAX_PIPELINE_RETRY})")
+    v2_eval  = evaluate_qa_sheet(qa_sheet, search_fn=lambda q: _search_agent(client, v2_index, q, strategy_v2))
+    v2_score = _score(v2_eval)
+    eval_history["v2"] = v2_eval
+    _print_eval_row("V2", v2_score, v2_eval)
 
-        # 에러 분석
-        error_analysis = analyze_errors(eval_history[f"v{retry}"]["errors"])
-        failed_qs = [e for e in eval_history[f"v{retry}"]["errors"]]
-        error_patterns = error_analysis.get("error_patterns", [])
-        print(f"  실패 문항  : {[e.get('question','')[:20] for e in failed_qs]}")
-        print(f"  에러 패턴  : {error_patterns}")
+    # ── STEP 3: V3 (Keyword+Analyzer+DCR + HYDE) ──────
+    _sep("STEP 3 : V3 (Analyzer+DCR + HYDE)")
+    strategy_v3 = {**DEFAULT_STRATEGY, "index_version": "v3",
+                   "use_keyword": True, "use_analyzer": True, "use_hyde": True, "use_dcr": True,
+                   "analyzer_config": {"type": "nori", "decompound_mode": "mixed"}}
+    print(f"  방식: Nori DCR 분석기 + HyDE 임베딩")
 
-        # 전략 수정 (retry 2회차부터 refine 적용)
-        if retry > 1:
-            print()
-            current_strategy = refine_strategy_from_errors(
-                current_strategy=current_strategy,
-                error_report={
-                    "score": best_score,
-                    "failed_questions": failed_qs,
-                    "error_patterns": error_patterns,
-                },
-                max_retry=MAX_ANALYSIS_RETRY,
-            )
-            print("  [AI 전략 수정 근거]")
-            for log in current_strategy.get("decision_log", []):
-                print(f"  → {log}")
+    all_keywords = extract_keywords(" ".join(d["text"] for d in raw_docs if d.get("text")))
+    dcr_rules    = get_decompound_rules(all_keywords, client, v1_index)
+    print(f"  DCR 규칙 수: {len(dcr_rules)}개")
 
-        # 전처리 + 인덱스 + 적재
-        use_dcr = current_strategy.get("use_dcr", False)
-        use_hyde = current_strategy.get("use_hyde", False)
-
-        # Build DCR rules: use default index as nori analyzer source
-        dcr_rules = []
-        if use_dcr:
-            all_keywords = extract_keywords(" ".join(
-                d["text"] for d in raw_docs if d.get("text")
-            ))
-            dcr_rules = get_decompound_rules(all_keywords, client, v1_index)
-
-        agent_docs = preprocess_agentic(
-            raw_docs,
-            keyword_fn=lambda x: extract_keywords(x),
-            embedding_fn=hash_embed,
-            use_analyzer_dcr=use_dcr,
-            use_hyde=use_hyde,
-            qa_sheet=qa_sheet,
-            os_client=client,
-            dcr_index=v1_index,
-        )
-        agent_index = f"adp_{version}"
-        _reset_index(client, agent_index)
-        create_agent_index(client, agent_index, current_strategy, dcr_rules=dcr_rules)
-        ingest_documents_default(client, agent_index, agent_docs)
-        client.indices.refresh(index=agent_index)
-
-        # 평가
-        agent_eval  = evaluate_qa_sheet(
-            qa_sheet,
-            search_fn=lambda q: _search_agent(client, agent_index, q, current_strategy),
-        )
-        agent_score = _score(agent_eval)
-        eval_history[version] = agent_eval
-        _print_eval_row(version.upper(), agent_score, agent_eval)
-
-        if agent_score > best_score:
-            best_score   = agent_score
-            best_version = version
-
-        if agent_score >= TARGET_SCORE:
-            _sep("완료")
-            print(f"  ✅ {version.upper()}에서 목표 달성! ({agent_score}점)")
-            return _build_result(version, current_strategy, eval_history)
-
-    # ── STEP 마지막: Data Sanity ────────────────────────
-    _sep("⚠️  Data Sanity Diagnosis")
-    print(f"  Max Retry({MAX_PIPELINE_RETRY}회) 소진. 최고 점수: {best_score}점 ({best_version})")
-    print("  원천 데이터 오류 여부 진단 중...")
-
-    last_eval   = eval_history[best_version]
-    failed_items = [
-        {"question": e.get("question", ""), "expected_answer": e.get("expected", "")}
-        for e in last_eval.get("errors", [])
-    ]
-    retrieved = [
-        {"question": e.get("question", ""), "retrieved_content": e.get("got", "")}
-        for e in last_eval.get("errors", [])
-    ]
-
-    sanity_report = diagnose_data_sanity(
-        failed_items=failed_items,
-        retrieved_excerpts=retrieved,
-        max_retry=MAX_ANALYSIS_RETRY,
+    v3_docs  = preprocess_agentic(
+        raw_docs,
+        keyword_fn=extract_keywords,
+        embedding_fn=bedrock_embed,
+        use_analyzer_dcr=True,
+        use_hyde=True,
+        qa_sheet=qa_sheet,
+        os_client=client,
+        dcr_index=v1_index,
     )
+    v3_index = "adp_v3"
+    _reset_index(client, v3_index)
+    create_agent_index(client, v3_index, strategy_v3, dcr_rules=dcr_rules)
+    ingest_documents_v3(client, v3_index, v3_docs)
+    client.indices.refresh(index=v3_index)
 
-    print(f"\n  overall_verdict: {sanity_report['overall_verdict']}")
-    for item in sanity_report.get("items", []):
-        _sep()
-        print(f"  진단      : [{item['diagnosis']}]")
-        print(f"  질문      : {item['question']}")
-        print(f"  기대값    : {item['expected_answer']}")
-        print(f"  검색값    : {item['retrieved_content']}")
-        print(f"  ⚠️  수정가이드: {item['fix_guide']}")
-        print(f"  담당자    : {item['fix_target']}")
-    _sep()
-    print(f"  📋 {sanity_report['summary']}")
+    v3_eval  = evaluate_qa_sheet(qa_sheet, search_fn=lambda q: _search_agent(client, v3_index, q, strategy_v3))
+    v3_score = _score(v3_eval)
+    eval_history["v3"] = v3_eval
+    _print_eval_row("V3", v3_score, v3_eval)
 
-    return _build_result(best_version, current_strategy, eval_history, sanity_report)
+    # ── 결과 요약 ──────────────────────────────────────
+    _sep("결과 요약")
+    for ver, ev in eval_history.items():
+        _print_eval_row(ver.upper(), _score(ev), ev)
+
+    best = max(eval_history, key=lambda v: eval_history[v].get("accuracy", 0))
+    print(f"\n  🏆 최고 버전: {best.upper()} ({_score(eval_history[best])}점)")
+    return _build_result(best, strategy_v3, eval_history)
 
 
 def _build_result(
